@@ -35,6 +35,11 @@ venv/
 env/
 ENV/
 .env
+.env*
+
+# Project docs (not part of source)
+Experience Packs Implementation.md
+experience_packs.json
 
 # IDE
 .idea/

@@ -1,174 +1,248 @@
-# Agents From Scratch 
+# Experience Packs: A Coachable Agent
 
-The repo is a guide to building agents from scratch. It builds up to an ["ambient"](https://blog.langchain.dev/introducing-ambient-agents/) agent that can manage your email with connection to the Gmail API. It's grouped into 4 sections, each with a notebook and accompanying code in the `src/email_assistant` directory. These section build from the basics of agents, to agent evaluation, to human-in-the-loop, and finally to memory. These all come together in an agent that you can deploy, and the principles can be applied to other agents across a wide range of tasks. 
+> **Disclaimer:** This project is a learning prototype, not production software. It builds on LangChain's open source [agents-from-scratch](https://github.com/langchain-ai/agents-from-scratch) tutorial and was developed with significant help from AI coding tools, including GitHub Copilot. Its purpose is to show the ideas behind structured reasoning traces, coaching, and reusable experience packs. It is not intended to run a real email workflow at scale.
 
-![overview](notebooks/img/overview.png)
+## What This Is
 
-## Environment Setup 
+Most AI agents are static. They start with a prompt and some tools, but they do not improve unless a developer changes the code or rewrites the instructions. Experience Packs explores a different idea: an agent that can be coached like a human colleague.
 
-### Python Version
+When the agent makes a decision, it can record a structured trace of that decision. A human coach can review the trace, explain what should happen next time, and turn that feedback into an Experience Pack. The next time the agent sees a similar situation, it can retrieve that pack and apply the lesson.
 
-* Ensure you're using Python 3.11 or later. 
-* This version is required for optimal compatibility with LangGraph. 
+This repository uses an email assistant as the demo surface, but the idea is broader than email. The email workflow is just the easiest way to show the pattern in a concrete form.
 
-```shell
-python3 --version
+## What Is Implemented Right Now
+
+The current repo has three working pieces.
+
+1. **Structured reasoning trace for triage**
+   The graph records a `StepTrace` for the triage decision. That trace includes the objective, the options considered, the chosen classification, the rationale, and a confidence score.
+
+2. **Coaching flow**
+   After the graph runs, a coach can review the trace and provide feedback. In the graph, this uses LangGraph interrupt support. In the Gmail test script, this also works through terminal input for local testing.
+
+3. **Experience Pack retrieval and reuse**
+   Coaching feedback is turned into an `ExperiencePack`, stored in the LangGraph Store, and retrieved before future triage decisions. In the Gmail test script, packs are also saved to `experience_packs.json` so they can be reused across script runs.
+
+## What Is Not Implemented Yet
+
+There are a few gaps between the concepts and the current code.
+
+1. The repo does **not** record structured traces for every reasoning step.
+2. The repo currently records a structured trace for the **triage step only**.
+3. Response planning, tool choice, tool execution, and human review decisions are not yet traced as separate `StepTrace` records.
+4. Trace data is not written to disk as a durable artifact.
+
+## Graph Flow
+
+```text
+START -> retrieve_experience -> triage_router -> [triage_interrupt_handler | response_agent | END]
+                                              response_agent -> coaching -> END
 ```
 
-### API Keys
+## Built On
 
-* If you don't have an OpenAI API key, you can sign up [here](https://openai.com/index/openai-api/).
-* Sign up for LangSmith [here](https://smith.langchain.com/).
-* Generate a LangSmith API key.
+This project extends [langchain-ai/agents-from-scratch](https://github.com/langchain-ai/agents-from-scratch). The original repository provides the email triage workflow, the human review pattern, tool calling, long term memory through LangGraph Store, and the evaluation dataset. This repo keeps that base structure and adds the Experience Pack layer on top.
 
-### Set Environment Variables
+## Setup
 
-* Create a `.env` file in the root directory:
+### Requirements
+
+- Python 3.11 or newer
+- OpenAI API key for GPT 4.1
+- LangSmith API key if you want tracing in LangSmith
+
+### Install
+
 ```shell
-# Copy the .env.example file to .env
-cp .env.example .env
-```
+git clone <this-repo>
+cd coachable-agent
 
-* Edit the `.env` file with the following:
-```shell
+# Create .env with your keys
+cat > .env << EOF
+OPENAI_API_KEY=your_openai_api_key
 LANGSMITH_API_KEY=your_langsmith_api_key
 LANGSMITH_TRACING=true
-LANGSMITH_PROJECT="interrupt-workshop"
-OPENAI_API_KEY=your_openai_api_key
+LANGSMITH_PROJECT=experience-packs
+EOF
+
+# Install dependencies
+pip install -e ".[dev]"
 ```
 
-* You can also set the environment variables in your terminal:
-```shell
-export LANGSMITH_API_KEY=your_langsmith_api_key
-export LANGSMITH_TRACING=true
-export OPENAI_API_KEY=your_openai_api_key
-```
-
-### Package Installation
-
-**Recommended: Using uv (faster and more reliable)**
+### Run Unit Tests
 
 ```shell
-# Install uv if you haven't already
-pip install uv
-
-# Install the package with development dependencies
-uv sync --extra dev
-
-# Activate the virtual environment
-source .venv/bin/activate
+python tests/test_experience_packs.py
 ```
 
-**Alternative: Using pip**
+This runs the unit tests for the core models, the Experience Pack library, deduplication, keyword retrieval, and usage tracking.
+
+### Run the Graph Locally
 
 ```shell
-$ python3 -m venv .venv
-$ source .venv/bin/activate
-# Ensure you have a recent version of pip (required for editable installs with pyproject.toml)
-$ python3 -m pip install --upgrade pip
-# Install the package in editable mode
-$ pip install -e .
+langgraph dev
 ```
 
-> **⚠️ IMPORTANT**: Do not skip the package installation step! This editable install is **required** for the notebooks to work correctly. The package is installed as `interrupt_workshop` with import name `email_assistant`, allowing you to import from anywhere with `from email_assistant import ...`
+This starts the `email_assistant_experience` graph locally. You can connect [Agent Inbox](https://github.com/langchain-ai/agent-inbox) to `http://127.0.0.1:2024` and use the graph id `email_assistant_experience`.
 
-## Structure 
+## Test with Real Gmail Messages
 
-The repo is organized into the 4 sections, with a notebook for each and accompanying code in the `src/email_assistant` directory.
+You can test the full loop against your real inbox. The current Gmail script reads your mail, sends it through the graph, lets you coach the result, and saves packs for reuse. It does **not** send real emails.
 
-### Preface: LangGraph 101
-For a brief introduction to LangGraph and some of the concepts used in this repo, see the [LangGraph 101 notebook](notebooks/langgraph_101.ipynb). This notebook explains the basics of chat models, tool calling, agents vs workflows, LangGraph nodes / edges / memory, and LangGraph Studio.
+### Step 1: Create a Google Cloud project and enable Gmail API
 
-### Building an agent 
-* Notebook: [notebooks/agent.ipynb](/notebooks/agent.ipynb)
-* Code: [src/email_assistant/email_assistant.py](/src/email_assistant/email_assistant.py)
+1. Open [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project
+3. Open **APIs & Services**
+4. Open **Library**
+5. Search for **Gmail API**
+6. Click **Enable**
 
-![overview-agent](notebooks/img/overview_agent.png)
+### Step 2: Configure the OAuth consent screen
 
-This notebook shows how to build the email assistant, combining an [email triage step](https://langchain-ai.github.io/langgraph/tutorials/workflows/) with an agent that handles the email response. You can see the linked code for the full implementation in `src/email_assistant/email_assistant.py`.
+1. Open **APIs & Services**
+2. Open **OAuth consent screen**
+3. Choose **External**
+4. Fill in the app name, support email, and developer email
+5. Continue through the remaining screens
+6. Add your Gmail address as a **Test user**
 
-![Screenshot 2025-04-04 at 4 06 18 PM](notebooks/img/studio.png)
+If you skip the test user step, Google will block the OAuth flow.
 
-### Evaluation 
-* Notebook: [notebooks/evaluation.ipynb](/notebooks/evaluation.ipynb)
+### Step 3: Create OAuth credentials
 
-![overview-eval](notebooks/img/overview_eval.png)
+1. Open **APIs & Services**
+2. Open **Credentials**
+3. Click **Create Credentials**
+4. Choose **OAuth client ID**
+5. Choose **Desktop app**
+6. Create the credential
+7. Download the JSON file
 
-This notebook introduces evaluation with an email dataset in [eval/email_dataset.py](/eval/email_dataset.py). It shows how to run evaluations using Pytest and the LangSmith `evaluate` API. It runs evaluation for emails responses using LLM-as-a-judge as well as evaluations for tools calls and triage decisions.
-
-![Screenshot 2025-04-08 at 8 07 48 PM](notebooks/img/eval.png)
-
-### Human-in-the-loop 
-* Notebook: [notebooks/hitl.ipynb](/notebooks/hitl.ipynb)
-* Code: [src/email_assistant/email_assistant_hitl.py](/src/email_assistant/email_assistant_hitl.py)
-
-![overview-hitl](notebooks/img/overview_hitl.png)
-
-This notebooks shows how to add human-in-the-loop (HITL), allowing the user to review specific tool calls (e.g., send email, schedule meeting). For this, we use [Agent Inbox](https://github.com/langchain-ai/agent-inbox) as an interface for human in the loop. You can see the linked code for the full implementation in [src/email_assistant/email_assistant_hitl.py](/src/email_assistant/email_assistant_hitl.py).
-
-![Agent Inbox showing email threads](notebooks/img/agent-inbox.png)
-
-### Memory  
-* Notebook: [notebooks/memory.ipynb](/notebooks/memory.ipynb)
-* Code: [src/email_assistant/email_assistant_hitl_memory.py](/src/email_assistant/email_assistant_hitl_memory.py)
-
-![overview-memory](notebooks/img/overview_memory.png)  
-
-This notebook shows how to add memory to the email assistant, allowing it to learn from user feedback and adapt to preferences over time. The memory-enabled assistant ([email_assistant_hitl_memory.py](/src/email_assistant/email_assistant_hitl_memory.py)) uses the [LangGraph Store](https://langchain-ai.github.io/langgraph/concepts/memory/#long-term-memory) to persist memories. You can see the linked code for the full implementation in [src/email_assistant/email_assistant_hitl_memory.py](/src/email_assistant/email_assistant_hitl_memory.py).
-
-## Connecting to APIs  
-
-The above notebooks using mock email and calendar tools. 
-
-### Gmail Integration and Deployment
-
-Set up Google API credentials following the instructions in [Gmail Tools README](src/email_assistant/tools/gmail/README.md).
-
-The README also explains how to deploy the graph to LangGraph Platform.
-
-The full implementation of the Gmail integration is in [src/email_assistant/email_assistant_hitl_memory_gmail.py](/src/email_assistant/email_assistant_hitl_memory_gmail.py).
-
-## Running Tests
-
-The repository includes an automated test suite to evaluate the email assistant. 
-
-Tests verify correct tool usage and response quality using LangSmith for tracking.
-
-### Running Tests with [run_all_tests.py](/tests/run_all_tests.py)
+### Step 4: Save the credentials file
 
 ```shell
-python tests/run_all_tests.py
+mkdir .secrets
+cp ~/Downloads/client_secret_*.json .secrets/credentials.json
 ```
 
-### Test Results
+### Step 5: Set your OpenAI API key
 
-Test results are logged to LangSmith under the project name specified in your `.env` file (`LANGSMITH_PROJECT`). This provides:
-- Visual inspection of agent traces
-- Detailed evaluation metrics
-- Comparison of different agent implementations
+Make sure `.env` contains:
 
-### Available Test Implementations
+```text
+OPENAI_API_KEY=sk-your-real-key-here
+```
 
-The available implementations for testing are:
-- `email_assistant` - Basic email assistant
-
-### Testing Notebooks
-
-You can also run tests to verify all notebooks execute without errors:
+### Step 6: Run the OAuth setup script
 
 ```shell
-# Run all notebook tests
-python tests/test_notebooks.py
-
-# Or run via pytest
-pytest tests/test_notebooks.py -v
+python scripts/setup_gmail.py
 ```
 
-## Future Extensions
+This opens a browser window so you can sign in and approve Gmail access. The script requests Gmail read access only. When it succeeds, it saves a token file to `.secrets/token.json`.
 
-Add [LangMem](https://langchain-ai.github.io/langmem/) to manage memories:
-* Manage a collection of background memories. 
-* Add memory tools that can look up facts in the background memories. 
+### Step 7: Process real emails
 
+```shell
+# Process up to 3 unread messages from the last 24 hours
+python scripts/test_gmail_live.py --minutes 1440 --max-emails 3
 
+# Process messages and coach after each one
+python scripts/test_gmail_live.py --minutes 1440 --max-emails 3 --coach
+
+# Filter to a specific recipient address
+python scripts/test_gmail_live.py --minutes 1440 --email you@gmail.com --coach
+```
+
+With `--coach`, the script prompts you after each email:
+
+```text
+Coach feedback (or press Enter to skip):
+```
+
+If you give feedback, the script generates an Experience Pack and writes the updated pack library to `experience_packs.json` at the repo root.
+
+## What Is Real and What Is Mock
+
+| Component | Status |
+|---|---|
+| Gmail message reading | Real |
+| Triage classification | Real |
+| Triage trace recording | Real |
+| Coaching to Experience Pack | Real |
+| Experience Pack retrieval | Real |
+| Email sending | Mock |
+| Calendar availability | Mock |
+
+## Persistence Model
+
+There are two kinds of persistence in the current repo.
+
+### Experience Packs
+
+Experience Packs are stored in the LangGraph Store under the `email_assistant / experience_packs` namespace. In the Gmail test script, they are also synced to `experience_packs.json` so they survive across separate script runs.
+
+### Structured Traces
+
+Structured traces live in graph state. They are available during execution and through the active checkpointer for that run. They are **not** currently written to disk as a separate file.
+
+## Project Structure
+
+```text
+src/email_assistant/
+├── experience_packs.py           # StepTrace, ExperiencePack, ExperienceLibrary
+├── email_assistant_experience.py # Main graph with retrieval, triage, response, coaching
+├── schemas.py                    # Base state definitions
+├── prompts.py                    # Prompt templates
+├── utils.py                      # Formatting and parsing helpers
+├── configuration.py              # LangGraph configuration
+├── tools/
+│   └── default/                  # Mock email and calendar tools
+└── eval/
+    └── email_dataset.py          # Synthetic email dataset
+
+scripts/
+├── setup_gmail.py                # Gmail OAuth setup
+└── test_gmail_live.py            # Gmail test script
+
+tests/
+└── test_experience_packs.py      # Unit tests
+
+langgraph.json                    # Graph registration
+experience_packs.json             # Saved pack library from Gmail test runs
+```
+
+## How It Works
+
+### 1. Retrieve Experience
+
+The `retrieve_experience` node looks up relevant Experience Packs for the incoming email and injects them into state.
+
+### 2. Triage with Trace
+
+The `triage_router` node classifies the email as `ignore`, `notify`, or `respond`. At this point, the graph records a `StepTrace` for the triage decision.
+
+### 3. Response Agent
+
+The response agent handles drafting, meeting scheduling, and follow up questions with human review support. Experience Pack directives are injected into the response prompt. The current implementation does not create separate `StepTrace` records for these response decisions.
+
+### 4. Coaching
+
+After the agent finishes, the `coaching` node presents the available trace to the coach. If the coach gives feedback, the model converts that feedback into an `ExperiencePack` and stores it.
+
+## Current Limits
+
+1. Retrieval uses keyword overlap, not semantic vector search.
+2. Structured tracing is partial. Only the triage step is traced today.
+3. Email sending and calendar actions are still mock implementations.
+4. Pack deduplication only catches exact trigger matches.
+5. Confidence values are heuristic.
+6. The repo currently assumes a single user context.
+
+## Credits
+
+1. Base tutorial and implementation surface: [LangChain / agents-from-scratch](https://github.com/langchain-ai/agents-from-scratch)
+2. Built with significant assistance from AI coding tools, including GitHub Copilot
+3. Experience Packs concept: independent idea, implemented here as a prototype
 
