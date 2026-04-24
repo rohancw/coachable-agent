@@ -2,6 +2,12 @@
 
 > **Disclaimer:** This project is a learning prototype, not production software. It builds on LangChain's open source [agents-from-scratch](https://github.com/langchain-ai/agents-from-scratch) tutorial and was developed with significant help from AI coding tools, including GitHub Copilot. Its purpose is to show the ideas behind structured reasoning traces, coaching, and reusable experience packs. It is not intended to run a real email workflow at scale.
 
+## Demo Video
+
+Watch the short walkthrough here:
+
+[![Experience Packs demo](https://img.youtube.com/vi/H5TPSXyChQ8/hqdefault.jpg)](https://www.youtube.com/watch?v=H5TPSXyChQ8)
+
 ## What This Is
 
 Most AI agents are static. They start with a prompt and some tools, but they do not improve unless a developer changes the code or rewrites the instructions. Experience Packs explores a different idea: an agent that can be coached like a human colleague.
