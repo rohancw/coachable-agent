@@ -13,6 +13,14 @@ class RouterSchema(BaseModel):
         "'notify' for important information that doesn't need a response, "
         "'respond' for emails that need a reply",
     )
+    confidence: float = Field(
+        ge=0, le=1,
+        description="How confident you are in this classification (0 to 1).",
+    )
+    alternatives_considered: list[str] = Field(
+        default_factory=list,
+        description="Other classifications you considered and briefly why they were rejected.",
+    )
 
 class StateInput(TypedDict):
     # This is the input to the state

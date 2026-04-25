@@ -168,31 +168,34 @@ class ExperienceLibrary:
     def retrieve(self, query: str, k: int = 3) -> List[ExperiencePack]:
         """Retrieve the most relevant active packs for a given email/query.
 
-        Uses LangGraph Store's built-in semantic search when available,
-        falling back to keyword overlap scoring.
+        Uses LangGraph Store's built-in semantic search as a candidate set,
+        then reranks with keyword overlap to avoid returning irrelevant packs
+        from stores that don't support true semantic indexing.
         """
         packs = self._load_packs()
         active_packs = [p for p in packs if p.active]
         if not active_packs:
             return []
 
-        # Try store.search with the actual query
+        # Always use keyword scoring as the final ranker.
+        # If store.search returns candidates, use those as the pool;
+        # otherwise fall back to all active packs.
+        candidates = active_packs
         try:
-            results = self.store.search(EXPERIENCE_NAMESPACE, query=query, limit=k * 2)
+            results = self.store.search(EXPERIENCE_NAMESPACE, query=query, limit=k * 3)
             if results:
-                found = []
+                store_packs = []
                 for item in results:
                     if isinstance(item.value, dict) and "pack_id" in item.value:
                         pack = ExperiencePack.model_validate(item.value)
                         if pack.active:
-                            found.append(pack)
-                if found:
-                    return found[:k]
+                            store_packs.append(pack)
+                if store_packs:
+                    candidates = store_packs
         except Exception:
             pass
 
-        # Fallback: simple keyword overlap scoring
-        return self._keyword_search(query, active_packs, k)
+        return self._keyword_search(query, candidates, k)
 
     def increment_usage(self, pack_ids: List[str]):
         """Bump usage_count for the given pack IDs."""

@@ -38,6 +38,7 @@ from email_assistant.experience_packs import (
     ExperienceLibrary,
     trace_reducer,
     COACHING_PACK_PROMPT,
+    save_traces_to_file,
 )
 from dotenv import load_dotenv
 
@@ -157,7 +158,18 @@ def triage_router(
     if injected_packs:
         pack_directives = "\n\n< Experience Packs (lessons from past coaching) >\n"
         for p in injected_packs:
-            pack_directives += f"- WHEN: {p.trigger_context}\n  DO: {p.directive}\n"
+            pack_directives += f"EXPERIENCE PACK\n"
+            pack_directives += f"  WHEN: {p.trigger_context}\n"
+            if p.applicability_criteria:
+                pack_directives += f"  APPLY ONLY IF:\n"
+                for c in p.applicability_criteria:
+                    pack_directives += f"    - {c}\n"
+            if p.negative_examples:
+                pack_directives += f"  DO NOT APPLY IF:\n"
+                for n in p.negative_examples:
+                    pack_directives += f"    - {n}\n"
+            pack_directives += f"  DO: {p.directive}\n"
+            pack_directives += f"  WHY: {p.rationale}\n\n"
         pack_directives += "</ Experience Packs >\n"
 
     system_prompt = triage_system_prompt.format(
@@ -181,7 +193,7 @@ def triage_router(
         options_considered=["ignore", "notify", "respond"],
         chosen_option=classification,
         rationale=result.reasoning,
-        confidence=0.9 if classification in ("ignore", "respond") else 0.7,
+        confidence=result.confidence,
     )
 
     if classification == "respond":
@@ -309,7 +321,18 @@ def llm_call(state: State, store: BaseStore) -> dict:
     if injected_packs:
         pack_context = "\n\n< Experience Packs (lessons from past coaching) >\n"
         for p in injected_packs:
-            pack_context += f"- WHEN: {p.trigger_context}\n  DO: {p.directive}\n"
+            pack_context += f"EXPERIENCE PACK\n"
+            pack_context += f"  WHEN: {p.trigger_context}\n"
+            if p.applicability_criteria:
+                pack_context += f"  APPLY ONLY IF:\n"
+                for c in p.applicability_criteria:
+                    pack_context += f"    - {c}\n"
+            if p.negative_examples:
+                pack_context += f"  DO NOT APPLY IF:\n"
+                for n in p.negative_examples:
+                    pack_context += f"    - {n}\n"
+            pack_context += f"  DO: {p.directive}\n"
+            pack_context += f"  WHY: {p.rationale}\n\n"
         pack_context += "</ Experience Packs >\n"
 
     system_prompt = agent_system_prompt_hitl_memory.format(
@@ -352,6 +375,7 @@ def interrupt_handler(
 ) -> Command[Literal["llm_call", "__end__"]]:
     """Creates an interrupt for human review of tool calls."""
     result = []
+    trace_entries = []
     goto = "llm_call"
 
     for tool_call in state["messages"][-1].tool_calls:
@@ -366,6 +390,22 @@ def interrupt_handler(
                     "content": observation,
                     "tool_call_id": tool_call["id"],
                 }
+            )
+            trace_entries.append(
+                StepTrace(
+                    objective=f"Execute non-HITL tool: {tool_call['name']}",
+                    instructions_received="Tool call selected by response agent",
+                    options_considered=["execute tool", "skip tool", "ask human"],
+                    tools_used=[tool_call["name"]],
+                    tool_outputs=[{
+                        "tool": tool_call["name"],
+                        "args": tool_call["args"],
+                        "output": observation,
+                    }],
+                    chosen_option="execute tool",
+                    rationale="Tool is allowed to run without human review.",
+                    confidence=1.0,
+                )
             )
             continue
 
@@ -601,19 +641,26 @@ def interrupt_handler(
             else:
                 raise ValueError(f"Invalid tool call: {tool_call['name']}")
 
-    # Build trace for this human review decision
-    reviewed_tools = [tc["name"] for tc in state["messages"][-1].tool_calls]
-    trace_entry = StepTrace(
-        objective=f"Human review of {', '.join(reviewed_tools)}",
-        instructions_received="HITL review request",
-        options_considered=["accept", "edit", "ignore", "response"],
-        tools_used=reviewed_tools,
-        chosen_option=response["type"],
-        rationale=str(response.get("args", ""))[:200] if response["type"] in ("response", "edit") else f"User chose to {response['type']}",
-        confidence=1.0,
-    )
+        # Build HITL trace entry for this specific tool review
+        trace_entries.append(
+            StepTrace(
+                objective=f"Human review of {tool_call['name']}",
+                instructions_received="HITL review request",
+                options_considered=["accept", "edit", "ignore", "response"],
+                tools_used=[tool_call["name"]],
+                tool_outputs=[{
+                    "tool": tool_call["name"],
+                    "args": tool_call["args"],
+                    "action": response["type"],
+                    "feedback": str(response.get("args", ""))[:200] if response["type"] in ("response", "edit") else None,
+                }],
+                chosen_option=response["type"],
+                rationale=str(response.get("args", ""))[:200] if response["type"] in ("response", "edit") else f"User chose to {response['type']}",
+                confidence=1.0,
+            )
+        )
 
-    return Command(goto=goto, update={"messages": result, "trace": [trace_entry]})
+    return Command(goto=goto, update={"messages": result, "trace": trace_entries})
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +750,25 @@ def coaching_node(state: State, store: BaseStore) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# NEW NODE: Persist trace to disk  (graph-native trace persistence)
+# ---------------------------------------------------------------------------
+
+
+def persist_trace(state: State, config) -> dict:
+    """Write the run's traces to trace_history.jsonl.
+
+    Uses the thread_id from config as the run_id so traces are attributable
+    to specific graph invocations regardless of caller (Studio, API, script).
+    """
+    trace = state.get("trace", [])
+    email_input = state.get("email_input", {})
+    if trace:
+        thread_id = config.get("configurable", {}).get("thread_id", "unknown")
+        save_traces_to_file(trace, email_input, run_id=thread_id)
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Graph construction
 # ---------------------------------------------------------------------------
 
@@ -726,6 +792,7 @@ overall_workflow.add_node("triage_router", triage_router)
 overall_workflow.add_node("triage_interrupt_handler", triage_interrupt_handler)
 overall_workflow.add_node("response_agent", response_agent)
 overall_workflow.add_node("coaching", coaching_node)
+overall_workflow.add_node("persist_trace", persist_trace)
 
 # Edges
 overall_workflow.add_edge(START, "retrieve_experience")
@@ -734,7 +801,8 @@ overall_workflow.add_edge("retrieve_experience", "triage_router")
 # triage_interrupt_handler uses Command() to route to response_agent or coaching
 # response_agent flows to coaching
 overall_workflow.add_edge("response_agent", "coaching")
-overall_workflow.add_edge("coaching", END)
+overall_workflow.add_edge("coaching", "persist_trace")
+overall_workflow.add_edge("persist_trace", END)
 
 # Compile
 email_assistant = overall_workflow.compile()
