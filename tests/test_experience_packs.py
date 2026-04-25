@@ -25,6 +25,8 @@ from email_assistant.experience_packs import (
     ExperiencePack,
     ExperienceLibrary,
     trace_reducer,
+    save_traces_to_file,
+    load_traces_from_file,
 )
 
 
@@ -48,22 +50,28 @@ class MockStore:
         if value is None:
             return None
         # Return an object with .value like LangGraph Item
-        return _Item(value)
+        return _Item(value, key)
 
     def put(self, namespace, key, value):
         k = self._key(namespace, key)
         self._data[k] = value
 
     def search(self, namespace, query=None, limit=10):
-        # Not supported in mock — library falls back to keyword search
-        raise NotImplementedError
+        """Return all items in the namespace (keyword filtering is done by ExperienceLibrary)."""
+        ns = tuple(namespace)
+        results = []
+        for (stored_ns, key), value in self._data.items():
+            if stored_ns == ns and isinstance(value, dict):
+                results.append(_Item(value, key))
+        return results[:limit]
 
 
 class _Item:
     """Minimal stand-in for langgraph.store.base.Item."""
 
-    def __init__(self, value):
+    def __init__(self, value, key=""):
         self.value = value
+        self.key = key
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +133,7 @@ def test_trace_reducer():
     assert len(combined) == 2
     assert combined[0].step_id == 0  # left side unchanged
     assert combined[1].step_id == 1  # auto-numbered
-    print("  ✅ trace_reducer")
+    print("  [ok] trace_reducer")
 
 
 def test_experience_library_add_and_retrieve():
@@ -155,7 +163,7 @@ def test_experience_library_add_and_retrieve():
     results = lib.retrieve("API documentation endpoints missing")
     assert len(results) >= 1
     assert any("API" in r.trigger_context for r in results)
-    print("  ✅ add_and_retrieve")
+    print("  [ok] add_and_retrieve")
 
 
 def test_deduplication():
@@ -178,7 +186,7 @@ def test_deduplication():
     returned = lib.add_pack(pack2)
     assert returned.pack_id == pack1.pack_id  # returned existing
     assert len(lib.list_packs()) == 1
-    print("  ✅ deduplication")
+    print("  [ok] deduplication")
 
 
 def test_usage_count():
@@ -196,7 +204,7 @@ def test_usage_count():
 
     lib.increment_usage([pack.pack_id])
     assert lib.list_packs()[0].usage_count == 1
-    print("  ✅ usage_count")
+    print("  [ok] usage_count")
 
 
 def test_deactivate():
@@ -213,7 +221,7 @@ def test_deactivate():
     lib.deactivate_pack(pack.pack_id)
     assert len(lib.list_packs()) == 0
     assert len(lib.list_packs(include_inactive=True)) == 1
-    print("  ✅ deactivate")
+    print("  [ok] deactivate")
 
 
 def test_persistence_across_instances():
@@ -233,7 +241,7 @@ def test_persistence_across_instances():
     packs = lib2.list_packs()
     assert len(packs) == 1
     assert packs[0].trigger_context == "persistence test"
-    print("  ✅ persistence_across_instances")
+    print("  [ok] persistence_across_instances")
 
 
 def test_keyword_search_ranking():
@@ -266,7 +274,123 @@ def test_keyword_search_ranking():
     results = lib.retrieve("daughter swimming registration summer")
     assert len(results) >= 1
     assert "swimming" in results[0].trigger_context.lower()
-    print("  ✅ keyword_search_ranking")
+    print("  [ok] keyword_search_ranking")
+
+
+def test_pack_specificity_fields():
+    """New fields: applicability_criteria, negative_examples, source_trace_ids."""
+    pack = ExperiencePack(
+        trigger_context="Emails from known personal contacts",
+        directive="Always notify",
+        applicability_criteria=["sender is a known personal contact"],
+        negative_examples=["sender is an automated mailing list"],
+        source_trace_ids=["1", "2"],
+        confidence=0.9,
+    )
+    assert pack.applicability_criteria == ["sender is a known personal contact"]
+    assert pack.negative_examples == ["sender is an automated mailing list"]
+    assert pack.source_trace_ids == ["1", "2"]
+
+    # Ensure they serialize/deserialize correctly
+    dumped = pack.model_dump()
+    restored = ExperiencePack.model_validate(dumped)
+    assert restored.applicability_criteria == pack.applicability_criteria
+    assert restored.negative_examples == pack.negative_examples
+    assert restored.source_trace_ids == pack.source_trace_ids
+    print("  [ok] pack_specificity_fields")
+
+
+def test_individual_pack_storage():
+    """Each pack is stored under its own key, not as a single blob."""
+    store = MockStore()
+    lib = ExperienceLibrary(store)
+
+    pack1 = ExperiencePack(
+        trigger_context="Test pack one",
+        directive="Do X",
+        confidence=0.8,
+    )
+    pack2 = ExperiencePack(
+        trigger_context="Test pack two",
+        directive="Do Y",
+        confidence=0.9,
+    )
+
+    lib.add_pack(pack1)
+    lib.add_pack(pack2)
+
+    # Verify each pack is stored under its own key
+    from email_assistant.experience_packs import EXPERIENCE_NAMESPACE
+    item1 = store.get(EXPERIENCE_NAMESPACE, pack1.pack_id)
+    item2 = store.get(EXPERIENCE_NAMESPACE, pack2.pack_id)
+    assert item1 is not None
+    assert item2 is not None
+    assert item1.value["pack_id"] == pack1.pack_id
+    assert item2.value["pack_id"] == pack2.pack_id
+
+    # Verify list_packs finds both
+    all_packs = lib.list_packs()
+    assert len(all_packs) == 2
+    print("  [ok] individual_pack_storage")
+
+
+def test_trace_persistence():
+    """Traces are saved to and loaded from JSONL."""
+    import tempfile
+    import os
+
+    traces = [
+        StepTrace(objective="triage", rationale="test", confidence=0.9),
+        StepTrace(objective="respond", rationale="test2", confidence=0.8),
+    ]
+    email_input = {"subject": "Test email", "author": "test@test.com"}
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = f.name
+
+    try:
+        save_traces_to_file(traces, email_input, "run-1", path=path)
+        save_traces_to_file(traces, email_input, "run-2", path=path)
+
+        records = load_traces_from_file(path=path)
+        assert len(records) == 2
+        assert records[0]["run_id"] == "run-1"
+        assert records[1]["run_id"] == "run-2"
+        assert len(records[0]["traces"]) == 2
+        print("  [ok] trace_persistence")
+    finally:
+        os.unlink(path)
+
+
+def test_migration_from_blob():
+    """Packs stored as a single blob are migrated to individual keys."""
+    store = MockStore()
+
+    # Simulate old-style blob storage
+    from email_assistant.experience_packs import EXPERIENCE_NAMESPACE, EXPERIENCE_KEY
+    pack1 = ExperiencePack(
+        trigger_context="Old pack one",
+        directive="Do X",
+        confidence=0.8,
+    )
+    pack2 = ExperiencePack(
+        trigger_context="Old pack two",
+        directive="Do Y",
+        confidence=0.9,
+    )
+    store.put(EXPERIENCE_NAMESPACE, EXPERIENCE_KEY, [pack1.model_dump(), pack2.model_dump()])
+
+    # Creating ExperienceLibrary triggers migration
+    lib = ExperienceLibrary(store)
+
+    # Old blob should be cleared
+    blob = store.get(EXPERIENCE_NAMESPACE, EXPERIENCE_KEY)
+    assert blob.value == []
+
+    # Packs should be individually stored and retrievable
+    all_packs = lib.list_packs()
+    assert len(all_packs) == 2
+    print("  [ok] migration_from_blob")
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +399,7 @@ def test_keyword_search_ranking():
 
 
 def run_all_tests():
-    print("\n🧪 Running Experience Packs unit tests...\n")
+    print("\nRunning Experience Packs unit tests...\n")
     test_trace_reducer()
     test_experience_library_add_and_retrieve()
     test_deduplication()
@@ -283,7 +407,11 @@ def run_all_tests():
     test_deactivate()
     test_persistence_across_instances()
     test_keyword_search_ranking()
-    print("\n✅ All tests passed!\n")
+    test_pack_specificity_fields()
+    test_individual_pack_storage()
+    test_trace_persistence()
+    test_migration_from_blob()
+    print("\n[ok] All tests passed!\n")
 
 
 if __name__ == "__main__":

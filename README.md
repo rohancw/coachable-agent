@@ -20,30 +20,36 @@ This repository uses an email assistant as the demo surface, but the idea is bro
 
 The current repo has three working pieces.
 
-1. **Structured reasoning trace for triage**
-   The graph records a `StepTrace` for the triage decision. That trace includes the objective, the options considered, the chosen classification, the rationale, and a confidence score.
+1. **Structured reasoning traces across multiple steps**
+   The graph records a `StepTrace` for the triage decision, each response-agent LLM call, and each human review action. Traces capture the objective, options considered, chosen option, rationale, tools used, and a confidence score.
 
-2. **Coaching flow**
-   After the graph runs, a coach can review the trace and provide feedback. In the graph, this uses LangGraph interrupt support. In the Gmail test script, this also works through terminal input for local testing.
+2. **Coaching flow for all outcomes**
+   Every terminal outcome (ignore, notify, respond) routes through the coaching node. A coach can review the full multi-step trace and provide feedback. In the graph, this uses LangGraph interrupt support. In the Gmail test script, this also works through terminal input for local testing.
 
 3. **Experience Pack retrieval and reuse**
-   Coaching feedback is turned into an `ExperiencePack`, stored in the LangGraph Store, and retrieved before future triage decisions. In the Gmail test script, packs are also saved to `experience_packs.json` so they can be reused across script runs.
+   Coaching feedback is turned into an `ExperiencePack` with structured fields including applicability criteria, negative examples, and source trace IDs. Packs are stored individually in the LangGraph Store for granular retrieval. In the Gmail test script, packs are also saved to `experience_packs.json` so they can be reused across script runs.
+
+4. **Trace persistence**
+   Run traces are appended to `trace_history.jsonl` after each email, so the full decision history is available for later analysis.
 
 ## What Is Not Implemented Yet
 
 There are a few gaps between the concepts and the current code.
 
-1. The repo does **not** record structured traces for every reasoning step.
-2. The repo currently records a structured trace for the **triage step only**.
-3. Response planning, tool choice, tool execution, and human review decisions are not yet traced as separate `StepTrace` records.
-4. Trace data is not written to disk as a durable artifact.
+1. Retrieval uses keyword overlap, not semantic vector search.
+2. Confidence values are heuristic, not model-generated.
+3. Email sending and calendar actions are still mock implementations.
+4. The repo currently assumes a single user context.
 
 ## Graph Flow
 
 ```text
-START -> retrieve_experience -> triage_router -> [triage_interrupt_handler | response_agent | END]
+START -> retrieve_experience -> triage_router -> [coaching | response_agent | triage_interrupt_handler]
+                                              triage_interrupt_handler -> [response_agent | coaching]
                                               response_agent -> coaching -> END
 ```
+
+All terminal outcomes route through coaching so the coach can review and provide feedback on any decision.
 
 ## Built On
 
@@ -176,6 +182,9 @@ If you give feedback, the script generates an Experience Pack and writes the upd
 | Gmail message reading | Real |
 | Triage classification | Real |
 | Triage trace recording | Real |
+| Response-agent trace recording | Real |
+| Human review trace recording | Real |
+| Trace persistence to disk | Real |
 | Coaching to Experience Pack | Real |
 | Experience Pack retrieval | Real |
 | Email sending | Mock |
@@ -187,11 +196,13 @@ There are two kinds of persistence in the current repo.
 
 ### Experience Packs
 
-Experience Packs are stored in the LangGraph Store under the `email_assistant / experience_packs` namespace. In the Gmail test script, they are also synced to `experience_packs.json` so they survive across separate script runs.
+Each Experience Pack is stored individually in the LangGraph Store under the `email_assistant / experience_packs` namespace, keyed by its `pack_id`. This allows granular semantic retrieval when the store supports it. In the Gmail test script, packs are also synced to `experience_packs.json` so they survive across separate script runs.
+
+Existing packs stored as a single blob are automatically migrated to individual storage on first load.
 
 ### Structured Traces
 
-Structured traces live in graph state. They are available during execution and through the active checkpointer for that run. They are **not** currently written to disk as a separate file.
+Structured traces live in graph state during execution and are also appended to `trace_history.jsonl` after each email in the Gmail test script. Each record includes the run ID, timestamp, email metadata, and the full list of step traces.
 
 ## Project Structure
 
@@ -217,6 +228,7 @@ tests/
 
 langgraph.json                    # Graph registration
 experience_packs.json             # Saved pack library from Gmail test runs
+trace_history.jsonl               # Persisted run traces from Gmail test runs
 ```
 
 ## How It Works
@@ -227,24 +239,23 @@ The `retrieve_experience` node looks up relevant Experience Packs for the incomi
 
 ### 2. Triage with Trace
 
-The `triage_router` node classifies the email as `ignore`, `notify`, or `respond`. At this point, the graph records a `StepTrace` for the triage decision.
+The `triage_router` node classifies the email as `ignore`, `notify`, or `respond`. The graph records a `StepTrace` for the triage decision.
 
-### 3. Response Agent
+### 3. Response Agent with Trace
 
-The response agent handles drafting, meeting scheduling, and follow up questions with human review support. Experience Pack directives are injected into the response prompt. The current implementation does not create separate `StepTrace` records for these response decisions.
+The response agent handles drafting, meeting scheduling, and follow up questions with human review support. Experience Pack directives are injected into the response prompt. Each LLM call and each human review action produce their own `StepTrace` records, capturing tools used, chosen actions, and rationale.
 
 ### 4. Coaching
 
-After the agent finishes, the `coaching` node presents the available trace to the coach. If the coach gives feedback, the model converts that feedback into an `ExperiencePack` and stores it.
+All terminal outcomes route through the `coaching` node. The coach can review the full multi-step trace and provide feedback. If the coach gives feedback, the model converts it into an `ExperiencePack` with structured fields: trigger context, directive, rationale, applicability criteria, negative examples, and source trace IDs.
 
 ## Current Limits
 
 1. Retrieval uses keyword overlap, not semantic vector search.
-2. Structured tracing is partial. Only the triage step is traced today.
-3. Email sending and calendar actions are still mock implementations.
-4. Pack deduplication only catches exact trigger matches.
-5. Confidence values are heuristic.
-6. The repo currently assumes a single user context.
+2. Email sending and calendar actions are still mock implementations.
+3. Pack deduplication only catches exact trigger matches.
+4. Confidence values are heuristic.
+5. The repo currently assumes a single user context.
 
 ## Credits
 

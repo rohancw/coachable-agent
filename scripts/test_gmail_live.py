@@ -71,17 +71,57 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+def _html_to_text(html_str):
+    """Convert HTML to clean plain text."""
+    import html2text
+    import re
+    h = html2text.HTML2Text()
+    h.ignore_links = True
+    h.ignore_images = True
+    h.body_width = 0
+    result = h.handle(html_str)
+    result = re.sub(r'-{2,}', '', result)
+    result = re.sub(r'\|', ' ', result)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
+
+
 def extract_body(payload):
-    """Recursively extract text from a Gmail message payload."""
-    if payload.get("body", {}).get("data"):
-        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+    """Recursively extract text from a Gmail message payload.
+    
+    Prefers text/plain; falls back to text/html converted via html2text.
+    """
+
     if payload.get("parts"):
-        texts = []
+        plain_texts = []
+        html_texts = []
         for part in payload["parts"]:
             mime = part.get("mimeType", "")
-            if "text/plain" in mime or "multipart" in mime:
-                texts.append(extract_body(part))
-        return "\n".join(t for t in texts if t)
+            if "multipart" in mime:
+                # Recurse into nested multipart
+                result = extract_body(part)
+                if result:
+                    plain_texts.append(result)
+            elif "text/plain" in mime:
+                plain_texts.append(extract_body(part))
+            elif "text/html" in mime:
+                html_texts.append(extract_body(part))
+        # Prefer plain text over HTML
+        if any(plain_texts):
+            return "\n".join(t for t in plain_texts if t)
+        if any(html_texts):
+            raw_html = "\n".join(t for t in html_texts if t)
+            return _html_to_text(raw_html)
+        return ""
+
+    # Leaf node with body data
+    if payload.get("body", {}).get("data"):
+        raw = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        mime = payload.get("mimeType", "")
+        if "text/html" in mime:
+            return _html_to_text(raw)
+        return raw
+
     return ""
 
 
@@ -174,6 +214,8 @@ def run_graph_on_email(email_input, thread_id, store, checkpointer):
             print(f"     Step {t.step_id}: {t.objective}")
             print(f"       -> Chose: {t.chosen_option}")
             print(f"       -> Rationale: {t.rationale}")
+            if t.tools_used:
+                print(f"       -> Tools: {', '.join(t.tools_used)}")
             print(f"       -> Confidence: {t.confidence}")
         print()
 
@@ -286,7 +328,7 @@ def main():
     from langgraph.store.memory import InMemoryStore
     from langgraph.checkpoint.memory import MemorySaver
     from email_assistant.experience_packs import (
-        seed_store_from_file, sync_store_to_file, PACKS_FILE_DEFAULT,
+        seed_store_from_file, sync_store_to_file, save_traces_to_file, PACKS_FILE_DEFAULT,
     )
 
     store = InMemoryStore()
@@ -307,6 +349,11 @@ def main():
         print(f"--- Email {i+1}/{len(emails)} ---")
         result = run_graph_on_email(email_input, thread_id=f"gmail-test-{i}",
                                     store=store, checkpointer=checkpointer)
+
+        # Persist traces to disk
+        trace = result.get("trace", [])
+        if trace:
+            save_traces_to_file(trace, email_input, run_id=f"gmail-test-{i}")
 
         if args.coach:
             trace = result.get("trace", [])

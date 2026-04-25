@@ -31,7 +31,7 @@ from email_assistant.prompts import (
     MEMORY_UPDATE_INSTRUCTIONS_REINFORCEMENT,
 )
 from email_assistant.schemas import RouterSchema, StateInput, UserPreferences
-from email_assistant.utils import parse_email, format_for_display, format_email_markdown
+from email_assistant.utils import parse_email, format_for_display, format_email_markdown, _html_to_text
 from email_assistant.experience_packs import (
     StepTrace,
     ExperiencePack,
@@ -116,7 +116,7 @@ def update_memory(store, namespace, messages):
 
 def retrieve_experience(state: State, store: BaseStore) -> dict:
     """Pull relevant Experience Packs from the store and inject into state."""
-    email_body = state["email_input"].get("email_thread", "")
+    email_body = _html_to_text(state["email_input"].get("email_thread", ""))
     subject = state["email_input"].get("subject", "")
     query = f"{subject} {email_body}"
 
@@ -199,7 +199,7 @@ def triage_router(
         }
     elif classification == "ignore":
         print("🚫 Classification: IGNORE - This email can be safely ignored")
-        goto = END
+        goto = "coaching"
         update = {
             "classification_decision": classification,
             "trace": [trace_entry],
@@ -224,7 +224,7 @@ def triage_router(
 
 def triage_interrupt_handler(
     state: State, store: BaseStore
-) -> Command[Literal["response_agent", "__end__"]]:
+) -> Command[Literal["response_agent", "coaching"]]:
     author, to, subject, email_thread = parse_email(state["email_input"])
     email_markdown = format_email_markdown(subject, author, to, email_thread)
 
@@ -280,7 +280,7 @@ def triage_interrupt_handler(
             }
         )
         update_memory(store, ("email_assistant", "triage_preferences"), messages)
-        goto = END
+        goto = "coaching"
 
     else:
         raise ValueError(f"Invalid response: {response}")
@@ -319,12 +319,26 @@ def llm_call(state: State, store: BaseStore) -> dict:
         cal_preferences=cal_preferences,
     ) + pack_context
 
+    llm_result = llm_with_tools.invoke(
+        [{"role": "system", "content": system_prompt}] + state["messages"]
+    )
+
+    # Build trace for this response-agent LLM call
+    tool_names = [tc["name"] for tc in (llm_result.tool_calls or [])]
+    chosen = tool_names[0] if tool_names else "no tool call"
+    trace_entry = StepTrace(
+        objective="Draft response or take action on email",
+        instructions_received=f"Response prefs + {len(injected_packs)} experience pack(s)",
+        options_considered=[t.name for t in tools],
+        tools_used=tool_names,
+        chosen_option=chosen,
+        rationale=llm_result.content[:200] if llm_result.content else f"Called {chosen}",
+        confidence=0.8,
+    )
+
     return {
-        "messages": [
-            llm_with_tools.invoke(
-                [{"role": "system", "content": system_prompt}] + state["messages"]
-            )
-        ]
+        "messages": [llm_result],
+        "trace": [trace_entry],
     }
 
 
@@ -587,7 +601,19 @@ def interrupt_handler(
             else:
                 raise ValueError(f"Invalid tool call: {tool_call['name']}")
 
-    return Command(goto=goto, update={"messages": result})
+    # Build trace for this human review decision
+    reviewed_tools = [tc["name"] for tc in state["messages"][-1].tool_calls]
+    trace_entry = StepTrace(
+        objective=f"Human review of {', '.join(reviewed_tools)}",
+        instructions_received="HITL review request",
+        options_considered=["accept", "edit", "ignore", "response"],
+        tools_used=reviewed_tools,
+        chosen_option=response["type"],
+        rationale=str(response.get("args", ""))[:200] if response["type"] in ("response", "edit") else f"User chose to {response['type']}",
+        confidence=1.0,
+    )
+
+    return Command(goto=goto, update={"messages": result, "trace": [trace_entry]})
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +730,8 @@ overall_workflow.add_node("coaching", coaching_node)
 # Edges
 overall_workflow.add_edge(START, "retrieve_experience")
 overall_workflow.add_edge("retrieve_experience", "triage_router")
-# triage_router uses Command() to route to triage_interrupt_handler, response_agent, or END
+# triage_router uses Command() to route to triage_interrupt_handler, response_agent, or coaching
+# triage_interrupt_handler uses Command() to route to response_agent or coaching
 # response_agent flows to coaching
 overall_workflow.add_edge("response_agent", "coaching")
 overall_workflow.add_edge("coaching", END)

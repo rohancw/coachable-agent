@@ -1,5 +1,6 @@
 from typing import List, Any
 import json
+import re
 import html2text
 
 def format_email_markdown(subject, author, to, email_thread, email_id=None):
@@ -13,6 +14,9 @@ def format_email_markdown(subject, author, to, email_thread, email_id=None):
         email_id: Optional email ID (for Gmail API)
     """
     id_section = f"\n**ID**: {email_id}" if email_id else ""
+
+    # Convert HTML email bodies to readable text
+    email_thread = _html_to_text(email_thread) if email_thread else email_thread
     
     return f"""
 
@@ -39,15 +43,7 @@ def format_gmail_markdown(subject, author, to, email_thread, email_id=None):
     id_section = f"\n**ID**: {email_id}" if email_id else ""
     
     # Check if email_thread is HTML content and convert to text if needed
-    if email_thread and (email_thread.strip().startswith("<!DOCTYPE") or 
-                          email_thread.strip().startswith("<html") or
-                          "<body" in email_thread):
-        # Convert HTML to markdown text
-        h = html2text.HTML2Text()
-        h.ignore_links = False
-        h.ignore_images = True
-        h.body_width = 0  # Don't wrap text
-        email_thread = h.handle(email_thread)
+    email_thread = _html_to_text(email_thread) if email_thread else email_thread
     
     return f"""
 
@@ -105,6 +101,23 @@ Arguments:"""
             display += f"\n{tool_call['args']}\n"
     return display
 
+def _html_to_text(text: str) -> str:
+    """Convert HTML email content to plain text if needed."""
+    if text and (text.strip().startswith("<!DOCTYPE") or 
+                 text.strip().startswith("<html") or
+                 "<body" in text):
+        h = html2text.HTML2Text()
+        h.ignore_links = True
+        h.ignore_images = True
+        h.body_width = 0
+        result = h.handle(text)
+        # Clean markdown table artifacts (pipes, separator rows)
+        result = re.sub(r'-{2,}', '', result)
+        result = re.sub(r'\|', ' ', result)
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        return result.strip()
+    return text
+
 def parse_email(email_input: dict) -> dict:
     """Parse an email input dictionary.
 
@@ -120,13 +133,13 @@ def parse_email(email_input: dict) -> dict:
             - author: Sender's name and email
             - to: Recipient's name and email
             - subject: Email subject line
-            - email_thread: Full email content
+            - email_thread: Full email content (HTML converted to text)
     """
     return (
         email_input["author"],
         email_input["to"],
         email_input["subject"],
-        email_input["email_thread"],
+        _html_to_text(email_input["email_thread"]),
     )
 
 def parse_gmail(email_input: dict) -> tuple[str, str, str, str, str]:
@@ -161,7 +174,7 @@ def parse_gmail(email_input: dict) -> tuple[str, str, str, str, str]:
         email_input["from"],
         email_input["to"],
         email_input["subject"],
-        email_input["body"],
+        _html_to_text(email_input["body"]),
         email_input["id"],
     )
     
